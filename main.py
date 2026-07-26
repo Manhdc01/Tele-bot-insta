@@ -1,18 +1,17 @@
 """
 Telegram Bot kiểm tra trạng thái Instagram (Live/Die) dùng Playwright
 ======================================================================
-Cập nhật mới:
-- Tăng tốc x5 lần nhờ:
-  1. Chặn tải Hình ảnh, CSS, Phông chữ, Media.
-  2. Rút ngắn thời gian chờ tải trang (DOM ready).
-  3. Giảm delay nghỉ giữa các lượt check xuống 0.5s.
-- Nút [⏹️ Dừng Check] luôn luôn tự động di chuyển xuống tin nhắn kết quả MỚI NHẤT.
+Phiên bản Tối ưu Tốc độ (Multi-threaded Speed Edition):
+- Chạy đa luồng song song (Mặc định 4 luồng check cùng lúc).
+- Báo kết quả 404 tức thì không chờ đợi.
+- Tự động di chuyển nút [⏹️ Dừng Check] xuống kết quả mới nhất.
 """
 
 import os
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import telebot
@@ -40,8 +39,6 @@ def run_health_server():
     server.serve_forever()
 
 # ---------------- Telegram ----------------
-# ---------------- Telegram ----------------
-# Đọc Token từ Biến môi trường (Environment Variable) để tránh bị lộ
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 
 if not BOT_TOKEN:
@@ -155,58 +152,6 @@ def extract_all_usernames_from_text(raw_text: str) -> list:
     return usernames
 
 
-# def check_instagram_status(browser, username: str) -> str:
-#     proxy = next_proxy()
-#     url = f"https://www.instagram.com/{username}/"
-
-#     context = browser.new_context(
-#         user_agent=UA,
-#         locale="en-US",
-#         proxy=proxy,
-#         viewport={"width": 800, "height": 600},
-#     )
-
-#     # 🚀 TỐI ƯU 1: Chặn tải Ảnh, CSS, Media, Font chữ
-#     context.route(
-#         "**/*",
-#         lambda route: route.abort()
-#         if route.request.resource_type in ["image", "stylesheet", "font", "media"]
-#         else route.continue_(),
-#     )
-
-#     try:
-#         page = context.new_page()
-#         try:
-#             # 🚀 TỐI ƯU 2: Giảm timeout chờ trang xuống 10s và wait_for_timeout xuống 600ms
-#             page.goto(url, wait_until="domcontentloaded", timeout=10000)
-#             page.wait_for_timeout(600)
-
-#             title = page.title()
-#             body_text = page.inner_text("body")
-
-#             die_signals = [
-#                 "profile isn't available",
-#                 "sorry, this page isn't available",
-#                 "page not found",
-#                 "content isn't available",
-#                 "link may be broken",
-#                 "profile may have been removed",
-#             ]
-#             body_lower = body_text.lower()
-#             title_lower = title.lower()
-
-#             if any(sig in body_lower for sig in die_signals) or any(
-#                 sig in title_lower for sig in die_signals
-#             ):
-#                 return "❌ DIE"
-
-#             return "✅ LIVE"
-#         finally:
-#             page.close()
-#     except Exception as e:
-#         return f"⚠️ Lỗi khi mở trang: {e}"
-#     finally:
-#         context.close()
 def check_instagram_status(browser, username: str) -> str:
     proxy = next_proxy()
     url = f"https://www.instagram.com/{username}/"
@@ -218,7 +163,7 @@ def check_instagram_status(browser, username: str) -> str:
         viewport={"width": 800, "height": 600},
     )
 
-    # Chỉ chặn Ảnh, Font, Media (Giữ lại CSS nhẹ để Insta render chữ chuẩn)
+    # Chặn tải Ảnh, Font, Media để tối ưu băng thông
     context.route(
         "**/*",
         lambda route: route.abort()
@@ -229,25 +174,26 @@ def check_instagram_status(browser, username: str) -> str:
     try:
         page = context.new_page()
         try:
-            # 1. BẮT MÃ RESPONSE HTTP TỪ INSTAGRAM
-            response = page.goto(url, wait_until="domcontentloaded", timeout=12000)
+            # 🚀 TỐI ƯU 1: Timeout rút ngắn xuống 8s
+            response = page.goto(url, wait_until="domcontentloaded", timeout=8000)
 
-            # Nếu Server trả về thẳng 404 -> CHẮC CHẮN DIE
+            # 🚀 TỐI ƯU 2: Báo DIE ngay lập tức nếu Server trả về 404
             if response and response.status == 404:
                 return "❌ DIE"
 
-            # Chờ 1s cho JS render nội dung
-            page.wait_for_timeout(1000)
+            # 🚀 TỐI ƯU 3: Giảm thời gian chờ render JS xuống chỉ 300ms
+            page.wait_for_timeout(300)
 
             current_url = page.url.lower()
             title = page.title().lower()
-            body_text = page.inner_text("body").lower()
 
-            # 2. KIỂM TRA BỊ BLOCK IP / CHUYỂN HƯỚNG SANG TRANG LOGIN
+            # Bị Block IP / Chuyển hướng Login
             if "accounts/login" in current_url or "log in" in title or "đăng nhập" in title:
                 return "⚠️ IP bị Insta Block (Dính trang Login)"
 
-            # 3. CÁC DẤU HIỆU XÁC NHẬN DIE
+            body_text = page.inner_text("body").lower()
+
+            # Dấu hiệu DIE
             die_signals = [
                 "profile isn't available",
                 "sorry, this page isn't available",
@@ -262,8 +208,7 @@ def check_instagram_status(browser, username: str) -> str:
             if any(sig in body_text for sig in die_signals) or any(sig in title for sig in die_signals):
                 return "❌ DIE"
 
-            # 4. KIỂM TRA DẤU HIỆU XÁC NHẬN LIVE
-            # Trang Live chuẩn phải chứa Username hoặc thông số Posts/Followers
+            # Dấu hiệu LIVE
             if (
                 username.lower() in title
                 or username.lower() in body_text
@@ -273,15 +218,15 @@ def check_instagram_status(browser, username: str) -> str:
             ):
                 return "✅ LIVE"
 
-            # Nếu không tìm thấy dấu hiệu rõ ràng -> Mặc định báo DIE để an toàn
             return "❌ DIE"
 
         finally:
             page.close()
     except Exception as e:
-        return f"⚠️ Lỗi kết nối: {e}"
+        return f"⚠️ Lỗi kết nối / Timeout"
     finally:
         context.close()
+
 
 # ---------------- Quản lý Session & Tiến trình ----------------
 user_sessions = {}
@@ -351,10 +296,6 @@ def handle_check(message):
         status = f"⚠️ Lỗi hệ thống: {e}"
 
     bot.reply_to(message, f"👤 @{username}\n{status}")
-
-
-# 🚀 TỐI ƯU 3: Mặc định giảm delay giữa các lần check xuống 0.5s
-CHECK_DELAY_SECONDS = float(os.environ.get("CHECK_DELAY_SECONDS", "0.5"))
 
 
 @bot.message_handler(commands=["checklist"])
@@ -429,10 +370,12 @@ def run_check_loop_thread(chat_id: int, usernames: list, control_msg_id: int):
     stopped_by_user = False
     last_msg_id = None
 
-    # Sửa tin nhắn điều khiển ban đầu thành thông báo bắt đầu
+    # SỐ LUỒNG CHECK SONG SONG (Tăng lên 4 luồng giúp nhanh gấp 4 lần)
+    MAX_WORKERS = int(os.environ.get("MAX_WORKERS", 4))
+
     try:
         bot.edit_message_text(
-            f"🚀 **Đang tiến hành check {total} tài khoản ...**",
+            f"🚀 **Đang tiến hành check song song {total} tài khoản ({MAX_WORKERS} luồng)...**",
             chat_id=chat_id,
             message_id=control_msg_id,
             parse_mode="Markdown",
@@ -444,54 +387,63 @@ def run_check_loop_thread(chat_id: int, usernames: list, control_msg_id: int):
         with sync_playwright() as p:
             browser = p.chromium.launch(headless=True)
             try:
-                for i, uname in enumerate(usernames, 1):
-                    # Kiểm tra cờ Dừng
-                    with active_checks_lock:
-                        if active_checks.get(chat_id, {}).get("stop"):
-                            stopped_by_user = True
-                            break
+                with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                    for i in range(0, total, MAX_WORKERS):
+                        # Kiểm tra cờ dừng trước mỗi lô
+                        with active_checks_lock:
+                            if active_checks.get(chat_id, {}).get("stop"):
+                                stopped_by_user = True
+                                break
 
-                    status = check_instagram_status(browser, uname)
+                        batch = usernames[i : i + MAX_WORKERS]
+                        futures = {
+                            executor.submit(check_instagram_status, browser, uname): (idx + 1, uname)
+                            for idx, uname in enumerate(batch, start=i)
+                        }
 
-                    # Xóa nút Dừng ở tin nhắn trước đó (nếu có)
-                    if last_msg_id:
-                        try:
-                            bot.edit_message_reply_markup(
-                                chat_id=chat_id,
-                                message_id=last_msg_id,
-                                reply_markup=None,
-                            )
-                        except Exception:
-                            pass
+                        for future in as_completed(futures):
+                            idx, uname = futures[future]
 
-                    # Gửi tin nhắn kết quả MỚI và gắn nút [⏹️ Dừng Check] vào đó
-                    is_last = i == total
-                    reply_markup = None if is_last else get_stop_keyboard()
-
-                    sent_item_msg = bot.send_message(
-                        chat_id,
-                        f"[{i}/{total}] 👤 @{uname}\n{status}",
-                        reply_markup=reply_markup,
-                    )
-                    last_msg_id = sent_item_msg.message_id
-
-                    if "DIE" in status:
-                        die_list.append(uname)
-                    elif "LIVE" in status:
-                        live_list.append(uname)
-                    else:
-                        other_list.append(uname)
-
-                    if not is_last:
-                        sleep_intervals = int(CHECK_DELAY_SECONDS * 10)
-                        for _ in range(sleep_intervals):
-                            time.sleep(0.1)
                             with active_checks_lock:
                                 if active_checks.get(chat_id, {}).get("stop"):
                                     stopped_by_user = True
-                                    break
+
+                            try:
+                                status = future.result()
+                            except Exception as e:
+                                status = f"⚠️ Lỗi: {e}"
+
+                            # Xóa nút Dừng ở tin nhắn trước đó
+                            if last_msg_id:
+                                try:
+                                    bot.edit_message_reply_markup(
+                                        chat_id=chat_id,
+                                        message_id=last_msg_id,
+                                        reply_markup=None,
+                                    )
+                                except Exception:
+                                    pass
+
+                            is_last = (len(live_list) + len(die_list) + len(other_list) + 1) == total or stopped_by_user
+                            reply_markup = None if is_last else get_stop_keyboard()
+
+                            sent_item_msg = bot.send_message(
+                                chat_id,
+                                f"[{idx}/{total}] 👤 @{uname}\n{status}",
+                                reply_markup=reply_markup,
+                            )
+                            last_msg_id = sent_item_msg.message_id
+
+                            if "DIE" in status:
+                                die_list.append(uname)
+                            elif "LIVE" in status:
+                                live_list.append(uname)
+                            else:
+                                other_list.append(uname)
+
                         if stopped_by_user:
                             break
+
             finally:
                 browser.close()
     except Exception as e:
@@ -500,7 +452,7 @@ def run_check_loop_thread(chat_id: int, usernames: list, control_msg_id: int):
         with active_checks_lock:
             active_checks.pop(chat_id, None)
 
-    # Xóa nút Dừng trên tin nhắn vừa check xong trước khi in tổng kết
+    # Xóa nút Dừng trên tin nhắn cuối cùng trước khi tổng kết
     if last_msg_id:
         try:
             bot.edit_message_reply_markup(
@@ -526,7 +478,7 @@ def run_check_loop_thread(chat_id: int, usernames: list, control_msg_id: int):
         ]
 
     if other_list:
-        summary_lines.append(f"⚠️ Không xác định: {len(other_list)}")
+        summary_lines.append(f"⚠️ Không xác định / Bị Block: {len(other_list)}")
     if die_list:
         summary_lines.append(
             "\nDanh sách DIE:\n" + "\n".join(f"- @{u}" for u in die_list)
@@ -604,12 +556,10 @@ def handle_callback(call):
 # KHỞI CHẠY BOT VÀ WEB SERVER
 # ------------------------------------------------------------------
 if __name__ == "__main__":
-    # Bật Web Server phụ để giữ Render Free không bị shut down
     threading.Thread(target=run_health_server, daemon=True).start()
 
-    print("🤖 Bot đang chạy...")
+    print("🤖 Bot đang chạy (Chế độ Đa luồng Tốc độ cao)...")
 
-    # Xóa Webhook kẹt cũ để chống lỗi 409 Conflict
     try:
         bot.remove_webhook()
     except Exception:
