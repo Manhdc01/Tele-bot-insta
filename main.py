@@ -184,19 +184,13 @@ def handle_checklist(message):
 # 5. KHỞI CHẠY BOT
 # ------------------------------------------------------------------
 if __name__ == "__main__":
-    # Chạy Web Server ở luồng phụ
+   # Chạy Web Server phụ để giữ Render Free không tắt
     threading.Thread(target=run_health_server, daemon=True).start()
     
-    print("🤖 Bot đang khởi chạy...")
-    
-    # Ép Telegram hủy các kết nối/Webhook bị kẹt trước đó
+    print("🤖 Bot đang chạy...")
     try:
         bot.remove_webhook()
     except Exception:
         pass
         
-    time.sleep(2)  # Nghỉ 2 giây để Telegram reset hẳn session
-    print("🟢 Bot đã sẵn sàng nhận lệnh!")
-    
-    # Bắt đầu nhận tin nhắn và bỏ qua tin kẹt cũ
-    bot.infinity_polling(skip_pending=True, timeout=20, long_polling_timeout=20)
+    bot.infinity_polling(skip_pending=True)
