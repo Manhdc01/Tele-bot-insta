@@ -24,7 +24,7 @@ def run_health_server():
 # ------------------------------------------------------------------
 # 1. CẤU HÌNH BOT TELEGRAM
 # ------------------------------------------------------------------
-BOT_TOKEN = "DÁN_TOKEN_BOT_TELEGRAM_CỦA_BẠN_VÀO_ĐÂY"
+BOT_TOKEN = "8806336121:AAHp2BCurBpaPZkpicxX_PMT5YUWRkozodk"
 bot = telebot.TeleBot(BOT_TOKEN)
 
 USER_AGENTS = [
