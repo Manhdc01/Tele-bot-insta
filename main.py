@@ -1,22 +1,21 @@
 """
-Telegram Bot kiểm tra trạng thái Instagram (Live/Die) dùng Playwright
-======================================================================
-Phiên bản Tối ưu Tốc độ (Multi-threaded Speed Edition):
-- Chạy đa luồng song song (Mặc định 4 luồng check cùng lúc).
-- Báo kết quả 404 tức thì không chờ đợi.
-- Tự động di chuyển nút [⏹️ Dừng Check] xuống kết quả mới nhất.
+Telegram Bot kiểm tra trạng thái Instagram (Live/Die) dùng Playwright Async
+==========================================================================
+Phiên bản Sửa lỗi Greenlet Threading (Async Edition):
+- Dùng Playwright Async (async_api) để chạy 100% thread-safe trên 1 Thread.
+- Tối ưu 4 luồng song song bằng asyncio.Semaphore mà KHÔNG bị lỗi Greenlet.
+- Báo kết quả 404 tức thì, siêu nhẹ RAM (phù hợp Render Free 512MB RAM).
 """
 
 import os
 import re
+import asyncio
 import threading
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import telebot
 from telebot import types
-from playwright.sync_api import sync_playwright
+from playwright.async_api import async_playwright
 
 # ------------------------------------------------------------------
 # 0. WEB SERVER PHỤ - GIÚP RENDER FREE TIER HOẠT ĐỘNG 24/7
@@ -152,11 +151,11 @@ def extract_all_usernames_from_text(raw_text: str) -> list:
     return usernames
 
 
-def check_instagram_status(browser, username: str) -> str:
+async def check_instagram_status_async(browser, username: str) -> str:
     proxy = next_proxy()
     url = f"https://www.instagram.com/{username}/"
 
-    context = browser.new_context(
+    context = await browser.new_context(
         user_agent=UA,
         locale="en-US",
         proxy=proxy,
@@ -164,7 +163,7 @@ def check_instagram_status(browser, username: str) -> str:
     )
 
     # Chặn tải Ảnh, Font, Media để tối ưu băng thông
-    context.route(
+    await context.route(
         "**/*",
         lambda route: route.abort()
         if route.request.resource_type in ["image", "font", "media"]
@@ -172,26 +171,26 @@ def check_instagram_status(browser, username: str) -> str:
     )
 
     try:
-        page = context.new_page()
+        page = await context.new_page()
         try:
-            # 🚀 TỐI ƯU 1: Timeout rút ngắn xuống 8s
-            response = page.goto(url, wait_until="domcontentloaded", timeout=8000)
+            # 🚀 Timeout rút ngắn xuống 8s
+            response = await page.goto(url, wait_until="domcontentloaded", timeout=8000)
 
-            # 🚀 TỐI ƯU 2: Báo DIE ngay lập tức nếu Server trả về 404
+            # 🚀 Báo DIE ngay lập tức nếu Server trả về 404
             if response and response.status == 404:
                 return "❌ DIE"
 
-            # 🚀 TỐI ƯU 3: Giảm thời gian chờ render JS xuống chỉ 300ms
-            page.wait_for_timeout(300)
+            # 🚀 Giảm thời gian chờ render JS xuống 300ms
+            await page.wait_for_timeout(300)
 
             current_url = page.url.lower()
-            title = page.title().lower()
+            title = (await page.title()).lower()
 
             # Bị Block IP / Chuyển hướng Login
             if "accounts/login" in current_url or "log in" in title or "đăng nhập" in title:
                 return "⚠️ IP bị Insta Block (Dính trang Login)"
 
-            body_text = page.inner_text("body").lower()
+            body_text = (await page.inner_text("body")).lower()
 
             # Dấu hiệu DIE
             die_signals = [
@@ -221,11 +220,11 @@ def check_instagram_status(browser, username: str) -> str:
             return "❌ DIE"
 
         finally:
-            page.close()
+            await page.close()
     except Exception as e:
         return f"⚠️ Lỗi kết nối / Timeout"
     finally:
-        context.close()
+        await context.close()
 
 
 # ---------------- Quản lý Session & Tiến trình ----------------
@@ -287,11 +286,15 @@ def handle_check(message):
 
     bot.reply_to(message, f"Đang chạy @{username}...")
 
+    async def single_check():
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            status = await check_instagram_status_async(browser, username)
+            await browser.close()
+            return status
+
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
-            status = check_instagram_status(browser, username)
-            browser.close()
+        status = asyncio.run(single_check())
     except Exception as e:
         status = f"⚠️ Lỗi hệ thống: {e}"
 
@@ -364,14 +367,15 @@ def handle_collecting_text(message):
             pass
 
 
-def run_check_loop_thread(chat_id: int, usernames: list, control_msg_id: int):
+async def run_check_loop_async(chat_id: int, usernames: list, control_msg_id: int):
     total = len(usernames)
     live_list, die_list, other_list = [], [], []
     stopped_by_user = False
     last_msg_id = None
 
-    # SỐ LUỒNG CHECK SONG SONG (Tăng lên 4 luồng giúp nhanh gấp 4 lần)
     MAX_WORKERS = int(os.environ.get("MAX_WORKERS", 4))
+    sem = asyncio.Semaphore(MAX_WORKERS)
+    tele_lock = asyncio.Lock()
 
     try:
         bot.edit_message_text(
@@ -384,34 +388,40 @@ def run_check_loop_thread(chat_id: int, usernames: list, control_msg_id: int):
         pass
 
     try:
-        with sync_playwright() as p:
-            browser = p.chromium.launch(headless=True)
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
             try:
-                with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                    for i in range(0, total, MAX_WORKERS):
-                        # Kiểm tra cờ dừng trước mỗi lô
-                        with active_checks_lock:
-                            if active_checks.get(chat_id, {}).get("stop"):
-                                stopped_by_user = True
-                                break
+                async def worker(idx, uname):
+                    nonlocal stopped_by_user, last_msg_id
 
-                        batch = usernames[i : i + MAX_WORKERS]
-                        futures = {
-                            executor.submit(check_instagram_status, browser, uname): (idx + 1, uname)
-                            for idx, uname in enumerate(batch, start=i)
-                        }
+                    with active_checks_lock:
+                        if active_checks.get(chat_id, {}).get("stop"):
+                            stopped_by_user = True
+                            return
 
-                        for future in as_completed(futures):
-                            idx, uname = futures[future]
+                    async with sem:
+                        if stopped_by_user:
+                            return
+
+                        status = await check_instagram_status_async(browser, uname)
+
+                        async with tele_lock:
+                            if stopped_by_user:
+                                return
 
                             with active_checks_lock:
                                 if active_checks.get(chat_id, {}).get("stop"):
                                     stopped_by_user = True
 
-                            try:
-                                status = future.result()
-                            except Exception as e:
-                                status = f"⚠️ Lỗi: {e}"
+                            if "DIE" in status:
+                                die_list.append(uname)
+                            elif "LIVE" in status:
+                                live_list.append(uname)
+                            else:
+                                other_list.append(uname)
+
+                            checked_count = len(live_list) + len(die_list) + len(other_list)
+                            is_last = (checked_count == total) or stopped_by_user
 
                             # Xóa nút Dừng ở tin nhắn trước đó
                             if last_msg_id:
@@ -424,35 +434,31 @@ def run_check_loop_thread(chat_id: int, usernames: list, control_msg_id: int):
                                 except Exception:
                                     pass
 
-                            is_last = (len(live_list) + len(die_list) + len(other_list) + 1) == total or stopped_by_user
                             reply_markup = None if is_last else get_stop_keyboard()
 
                             sent_item_msg = bot.send_message(
                                 chat_id,
-                                f"[{idx}/{total}] 👤 @{uname}\n{status}",
+                                f"[{checked_count}/{total}] 👤 @{uname}\n{status}",
                                 reply_markup=reply_markup,
                             )
                             last_msg_id = sent_item_msg.message_id
 
-                            if "DIE" in status:
-                                die_list.append(uname)
-                            elif "LIVE" in status:
-                                live_list.append(uname)
-                            else:
-                                other_list.append(uname)
+                tasks = [worker(i + 1, uname) for i, uname in enumerate(usernames)]
 
-                        if stopped_by_user:
-                            break
+                for f in asyncio.as_completed(tasks):
+                    await f
+                    if stopped_by_user:
+                        break
 
             finally:
-                browser.close()
+                await browser.close()
     except Exception as e:
         bot.send_message(chat_id, f"⚠️ Có lỗi xảy ra trong tiến trình: {e}")
     finally:
         with active_checks_lock:
             active_checks.pop(chat_id, None)
 
-    # Xóa nút Dừng trên tin nhắn cuối cùng trước khi tổng kết
+    # Xóa nút Dừng ở tin nhắn cuối
     if last_msg_id:
         try:
             bot.edit_message_reply_markup(
@@ -485,6 +491,10 @@ def run_check_loop_thread(chat_id: int, usernames: list, control_msg_id: int):
         )
 
     bot.send_message(chat_id, "\n".join(summary_lines), parse_mode="Markdown")
+
+
+def run_check_loop_thread(chat_id: int, usernames: list, control_msg_id: int):
+    asyncio.run(run_check_loop_async(chat_id, usernames, control_msg_id))
 
 
 @bot.callback_query_handler(
@@ -558,7 +568,7 @@ def handle_callback(call):
 if __name__ == "__main__":
     threading.Thread(target=run_health_server, daemon=True).start()
 
-    print("🤖 Bot đang chạy (Chế độ Đa luồng Tốc độ cao)...")
+    print("🤖 Bot đang chạy (Chế độ Playwright Async Tốc độ cao)...")
 
     try:
         bot.remove_webhook()
