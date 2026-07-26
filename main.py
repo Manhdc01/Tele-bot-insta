@@ -155,6 +155,58 @@ def extract_all_usernames_from_text(raw_text: str) -> list:
     return usernames
 
 
+# def check_instagram_status(browser, username: str) -> str:
+#     proxy = next_proxy()
+#     url = f"https://www.instagram.com/{username}/"
+
+#     context = browser.new_context(
+#         user_agent=UA,
+#         locale="en-US",
+#         proxy=proxy,
+#         viewport={"width": 800, "height": 600},
+#     )
+
+#     # 🚀 TỐI ƯU 1: Chặn tải Ảnh, CSS, Media, Font chữ
+#     context.route(
+#         "**/*",
+#         lambda route: route.abort()
+#         if route.request.resource_type in ["image", "stylesheet", "font", "media"]
+#         else route.continue_(),
+#     )
+
+#     try:
+#         page = context.new_page()
+#         try:
+#             # 🚀 TỐI ƯU 2: Giảm timeout chờ trang xuống 10s và wait_for_timeout xuống 600ms
+#             page.goto(url, wait_until="domcontentloaded", timeout=10000)
+#             page.wait_for_timeout(600)
+
+#             title = page.title()
+#             body_text = page.inner_text("body")
+
+#             die_signals = [
+#                 "profile isn't available",
+#                 "sorry, this page isn't available",
+#                 "page not found",
+#                 "content isn't available",
+#                 "link may be broken",
+#                 "profile may have been removed",
+#             ]
+#             body_lower = body_text.lower()
+#             title_lower = title.lower()
+
+#             if any(sig in body_lower for sig in die_signals) or any(
+#                 sig in title_lower for sig in die_signals
+#             ):
+#                 return "❌ DIE"
+
+#             return "✅ LIVE"
+#         finally:
+#             page.close()
+#     except Exception as e:
+#         return f"⚠️ Lỗi khi mở trang: {e}"
+#     finally:
+#         context.close()
 def check_instagram_status(browser, username: str) -> str:
     proxy = next_proxy()
     url = f"https://www.instagram.com/{username}/"
@@ -166,24 +218,36 @@ def check_instagram_status(browser, username: str) -> str:
         viewport={"width": 800, "height": 600},
     )
 
-    # 🚀 TỐI ƯU 1: Chặn tải Ảnh, CSS, Media, Font chữ
+    # Chỉ chặn Ảnh, Font, Media (Giữ lại CSS nhẹ để Insta render chữ chuẩn)
     context.route(
         "**/*",
         lambda route: route.abort()
-        if route.request.resource_type in ["image", "stylesheet", "font", "media"]
+        if route.request.resource_type in ["image", "font", "media"]
         else route.continue_(),
     )
 
     try:
         page = context.new_page()
         try:
-            # 🚀 TỐI ƯU 2: Giảm timeout chờ trang xuống 10s và wait_for_timeout xuống 600ms
-            page.goto(url, wait_until="domcontentloaded", timeout=10000)
-            page.wait_for_timeout(600)
+            # 1. BẮT MÃ RESPONSE HTTP TỪ INSTAGRAM
+            response = page.goto(url, wait_until="domcontentloaded", timeout=12000)
 
-            title = page.title()
-            body_text = page.inner_text("body")
+            # Nếu Server trả về thẳng 404 -> CHẮC CHẮN DIE
+            if response and response.status == 404:
+                return "❌ DIE"
 
+            # Chờ 1s cho JS render nội dung
+            page.wait_for_timeout(1000)
+
+            current_url = page.url.lower()
+            title = page.title().lower()
+            body_text = page.inner_text("body").lower()
+
+            # 2. KIỂM TRA BỊ BLOCK IP / CHUYỂN HƯỚNG SANG TRANG LOGIN
+            if "accounts/login" in current_url or "log in" in title or "đăng nhập" in title:
+                return "⚠️ IP bị Insta Block (Dính trang Login)"
+
+            # 3. CÁC DẤU HIỆU XÁC NHẬN DIE
             die_signals = [
                 "profile isn't available",
                 "sorry, this page isn't available",
@@ -191,23 +255,33 @@ def check_instagram_status(browser, username: str) -> str:
                 "content isn't available",
                 "link may be broken",
                 "profile may have been removed",
+                "trang này không khả dụng",
+                "không tìm thấy trang",
             ]
-            body_lower = body_text.lower()
-            title_lower = title.lower()
 
-            if any(sig in body_lower for sig in die_signals) or any(
-                sig in title_lower for sig in die_signals
-            ):
+            if any(sig in body_text for sig in die_signals) or any(sig in title for sig in die_signals):
                 return "❌ DIE"
 
-            return "✅ LIVE"
+            # 4. KIỂM TRA DẤU HIỆU XÁC NHẬN LIVE
+            # Trang Live chuẩn phải chứa Username hoặc thông số Posts/Followers
+            if (
+                username.lower() in title
+                or username.lower() in body_text
+                or "posts" in body_text
+                or "followers" in body_text
+                or "instagram photos" in title
+            ):
+                return "✅ LIVE"
+
+            # Nếu không tìm thấy dấu hiệu rõ ràng -> Mặc định báo DIE để an toàn
+            return "❌ DIE"
+
         finally:
             page.close()
     except Exception as e:
-        return f"⚠️ Lỗi khi mở trang: {e}"
+        return f"⚠️ Lỗi kết nối: {e}"
     finally:
         context.close()
-
 
 # ---------------- Quản lý Session & Tiến trình ----------------
 user_sessions = {}
