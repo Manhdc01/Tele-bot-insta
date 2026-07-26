@@ -15,6 +15,11 @@ class HealthCheckHandler(BaseHTTPRequestHandler):
         self.send_header("Content-type", "text/html")
         self.end_headers()
         self.wfile.write(b"Bot is running!")
+    # THÊM ĐOẠN NÀY ĐỂ XỬ LÝ LỖI 501
+    def do_HEAD(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/html")
+        self.end_headers()
 
 def run_health_server():
     port = int(os.environ.get("PORT", 8080))
@@ -24,7 +29,7 @@ def run_health_server():
 # ------------------------------------------------------------------
 # 1. CẤU HÌNH BOT TELEGRAM
 # ------------------------------------------------------------------
-BOT_TOKEN = "8806336121:AAHp2BCurBpaPZkpicxX_PMT5YUWRkozodk"
+BOT_TOKEN = "8806336121:AAHJCZ5i8glHoe6CtzXnGgLnWGhVZBcldNc"
 bot = telebot.TeleBot(BOT_TOKEN)
 
 USER_AGENTS = [
