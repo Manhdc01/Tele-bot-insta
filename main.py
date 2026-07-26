@@ -40,7 +40,13 @@ def run_health_server():
     server.serve_forever()
 
 # ---------------- Telegram ----------------
-BOT_TOKEN = "8806336121:AAHp2BCurBpaPZkpicxX_PMT5YUWRkozodk"
+# ---------------- Telegram ----------------
+# Đọc Token từ Biến môi trường (Environment Variable) để tránh bị lộ
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+
+if not BOT_TOKEN:
+    raise ValueError("⚠️ Chưa cấu hình BOT_TOKEN trong Environment Variables!")
+
 bot = telebot.TeleBot(BOT_TOKEN, threaded=False)
 
 # ---------------- Proxy (tuỳ chọn) ----------------
